@@ -1,0 +1,8 @@
+PASS test_bounce_long_on_tested_support
+PASS test_cooldown_blocks_reentry
+PASS test_false_break_does_not_enter_short
+PASS test_future_perturbation
+PASS test_gap_through_stop_fills_at_open
+PASS test_mirror_symmetry
+PASS test_no_overlap_and_sane_levels
+PASS test_prefix_invariance

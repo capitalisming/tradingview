@@ -1,0 +1,24 @@
+default {'n': 5895, 'win': np.float64(33.9), 'avgR': np.float64(-0.07), 'lo': np.float64(-0.13), 'hi': np.float64(-0.015), 'pfR': np.float64(0.9)}
+pivot 3/3 {'n': 8788, 'win': np.float64(34.4), 'avgR': np.float64(-0.055), 'lo': np.float64(-0.104), 'hi': np.float64(-0.008), 'pfR': np.float64(0.92)}
+pivot 8/8 {'n': 3221, 'win': np.float64(35.1), 'avgR': np.float64(-0.034), 'lo': np.float64(-0.102), 'hi': np.float64(0.03), 'pfR': np.float64(0.95)}
+touches 2 {'n': 9235, 'win': np.float64(34.3), 'avgR': np.float64(-0.056), 'lo': np.float64(-0.094), 'hi': np.float64(-0.02), 'pfR': np.float64(0.92)}
+touches 4 {'n': 2485, 'win': np.float64(34.1), 'avgR': np.float64(-0.065), 'lo': np.float64(-0.143), 'hi': np.float64(0.009), 'pfR': np.float64(0.91)}
+score 0 {'n': 5900, 'win': np.float64(33.8), 'avgR': np.float64(-0.071), 'lo': np.float64(-0.131), 'hi': np.float64(-0.017), 'pfR': np.float64(0.9)}
+score 55 {'n': 5646, 'win': np.float64(34.1), 'avgR': np.float64(-0.063), 'lo': np.float64(-0.126), 'hi': np.float64(-0.003), 'pfR': np.float64(0.91)}
+rr 1.5 {'n': 6342, 'win': np.float64(39.7), 'avgR': np.float64(-0.094), 'lo': np.float64(-0.132), 'hi': np.float64(-0.058), 'pfR': np.float64(0.86)}
+rr 3 {'n': 5204, 'win': np.float64(26.1), 'avgR': np.float64(-0.043), 'lo': np.float64(-0.128), 'hi': np.float64(0.036), 'pfR': np.float64(0.95)}
+только отскок {'n': 4837, 'win': np.float64(34.2), 'avgR': np.float64(-0.067), 'lo': np.float64(-0.116), 'hi': np.float64(-0.023), 'pfR': np.float64(0.91)}
+только пробой {'n': 2518, 'win': np.float64(35.9), 'avgR': np.float64(0.005), 'lo': np.float64(-0.073), 'hi': np.float64(0.077), 'pfR': np.float64(1.01)}
+пробой: confirm {'n': 5066, 'win': np.float64(33.9), 'avgR': np.float64(-0.071), 'lo': np.float64(-0.124), 'hi': np.float64(-0.021), 'pfR': np.float64(0.9)}
+пробой: retest {'n': 5640, 'win': np.float64(33.7), 'avgR': np.float64(-0.081), 'lo': np.float64(-0.141), 'hi': np.float64(-0.024), 'pfR': np.float64(0.89)}
+только тренд.линии {'n': 5104, 'win': np.float64(34.4), 'avgR': np.float64(-0.056), 'lo': np.float64(-0.121), 'hi': np.float64(0.005), 'pfR': np.float64(0.92)}
+только уровни {'n': 2125, 'win': np.float64(33.5), 'avgR': np.float64(-0.078), 'lo': np.float64(-0.145), 'hi': np.float64(-0.01), 'pfR': np.float64(0.89)}
+без фильтра тренда {'n': 7295, 'win': np.float64(32.5), 'avgR': np.float64(-0.115), 'lo': np.float64(-0.153), 'hi': np.float64(-0.08), 'pfR': np.float64(0.84)}
+без ATR-фильтра {'n': 6025, 'win': np.float64(34.1), 'avgR': np.float64(-0.064), 'lo': np.float64(-0.12), 'hi': np.float64(-0.012), 'pfR': np.float64(0.91)}
+SL ATR {'n': 7016, 'win': np.float64(34.7), 'avgR': np.float64(-0.038), 'lo': np.float64(-0.093), 'hi': np.float64(0.011), 'pfR': np.float64(0.95)}
+TP уровень {'n': 4819, 'win': np.float64(33.3), 'avgR': np.float64(-0.068), 'lo': np.float64(-0.125), 'hi': np.float64(-0.016), 'pfR': np.float64(0.91)}
+trailing 1R {'n': 6437, 'win': np.float64(38.5), 'avgR': np.float64(-0.029), 'lo': np.float64(-0.093), 'hi': np.float64(0.038), 'pfR': np.float64(0.95)}
+BE 1R {'n': 6417, 'win': np.float64(26.4), 'avgR': np.float64(-0.075), 'lo': np.float64(-0.128), 'hi': np.float64(-0.024), 'pfR': np.float64(0.87)}
+partial 50% 1R {'n': 5895, 'win': np.float64(34.1), 'avgR': np.float64(-0.089), 'lo': np.float64(-0.132), 'hi': np.float64(-0.05), 'pfR': np.float64(0.84)}
+reverse {'n': 6216, 'win': np.float64(33.4), 'avgR': np.float64(-0.061), 'lo': np.float64(-0.113), 'hi': np.float64(-0.012), 'pfR': np.float64(0.91)}
+объём {'n': 5319, 'win': np.float64(34.0), 'avgR': np.float64(-0.071), 'lo': np.float64(-0.129), 'hi': np.float64(-0.018), 'pfR': np.float64(0.9)}

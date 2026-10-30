@@ -1,0 +1,4 @@
+Стратегия IS: {'n': 5895, 'win': np.float64(33.9), 'avgR': np.float64(-0.07), 'lo': np.float64(-0.13), 'hi': np.float64(-0.015), 'pfR': np.float64(0.9)}
+Случайные входы, seed 1: {'n': 5521, 'win': np.float64(35.2), 'avgR': np.float64(-0.058), 'lo': np.float64(-0.105), 'hi': np.float64(-0.012), 'pfR': np.float64(0.92)}
+Случайные входы, seed 2: {'n': 5432, 'win': np.float64(34.9), 'avgR': np.float64(-0.067), 'lo': np.float64(-0.112), 'hi': np.float64(-0.021), 'pfR': np.float64(0.91)}
+Случайные входы, seed 3: {'n': 5349, 'win': np.float64(33.8), 'avgR': np.float64(-0.096), 'lo': np.float64(-0.137), 'hi': np.float64(-0.048), 'pfR': np.float64(0.87)}

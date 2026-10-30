@@ -1,0 +1,634 @@
+//@version=6
+// ============================================================================
+// Key Lines Engine — трендовые линии и уровни: отскок / пробой / ретест
+// ----------------------------------------------------------------------------
+// Принципы:
+//  * Все решения принимаются только на ЗАКРЫТОЙ свече; вход — по open следующей.
+//  * Pivot становится известен через pivotRight баров; линия рождается в момент
+//    подтверждения и никогда не сдвигается назад во времени.
+//  * Long и Short считаются ОДНИМ кодом через знак стороны s (+1 / -1), поэтому
+//    направления зеркальны по построению.
+//  * Прибыльность НЕ гарантируется. Результаты тестов — в README.
+// ============================================================================
+// Модель исполнения: расчёт только на закрытии бара, исполнение на open следующего.
+// pyramiding = 0  — одна чистая позиция на инструмент.
+// commission 0.08% — допущение суммарных издержек одного исполнения (комиссия + спред + проскальзывание).
+// Это не тариф биржи: сверьте с вашим (на Binance spot стандартная комиссия выше). slippage = 0, чтобы не считать дважды.
+// margin = 0      — лимит экспозиции задаётся входом maxExposure, а не маржин-коллом.
+strategy("Key Lines Engine", shorttitle = "KLE", overlay = true,
+     initial_capital = 10000, currency = currency.NONE,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     pyramiding = 0,
+     calc_on_every_tick = false,
+     calc_on_order_fills = false,
+     process_orders_on_close = false,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.08,
+     slippage = 0,
+     margin_long = 0, margin_short = 0,
+     fill_orders_on_standard_ohlc = true,
+     max_bars_back = 1000,
+     max_lines_count = 120, max_labels_count = 150, max_boxes_count = 40)
+
+// ─── КОНСТАНТЫ ──────────────────────────────────────────────────────────────
+const int ST_ACTIVE = 0                   // линия работает, цена с её рабочей стороны
+const int ST_BROKEN = 1                   // закрытие за линией, ждём подтверждения/ретеста
+const int DRAW_BACK = 900                // глубина рисования: объекты не уходят дальше этого числа баров назад
+const int K_TREND   = 1
+const int K_HORIZ   = 2
+
+const int SIG_BOUNCE = 1
+const int SIG_BREAK  = 2
+const int SIG_RETEST = 3
+
+const string M_CONFIRM = "Подтверждение"
+const string M_RETEST  = "Ретест"
+const string M_BOTH    = "Оба"
+const string T_OFF     = "Выкл"
+const string T_EMA     = "EMA графика"
+const string T_HTF     = "EMA старшего ТФ"
+const string SL_SWING  = "За экстремумом"
+const string SL_ATR    = "ATR"
+const string TP_RR     = "Risk/Reward"
+const string TP_LEVEL  = "Следующий уровень"
+const string TP_TRAIL  = "Только trailing"
+
+// ─── ПАРАМЕТРЫ ──────────────────────────────────────────────────────────────
+const string G_TEST = "1. Период и направления"
+bool allowLong  = input.bool(true, "Разрешить Long", group = G_TEST)
+bool allowShort = input.bool(true, "Разрешить Short", group = G_TEST)
+int  startTime  = input.time(timestamp("01 Jan 2018 00:00 +0000"), "Начало теста", group = G_TEST)
+int  endTime    = input.time(timestamp("31 Dec 2099 00:00 +0000"), "Конец теста", group = G_TEST)
+
+const string G_LINE = "2. Построение линий"
+int   atrLen      = input.int(14, "Период ATR", minval = 2, group = G_LINE)
+int   pivotLeft   = input.int(5, "Pivot: баров слева", minval = 1, group = G_LINE)
+int   pivotRight  = input.int(5, "Pivot: баров справа (задержка подтверждения)", minval = 1, group = G_LINE)
+int   minTouches  = input.int(3, "Касаний для подтверждения линии", minval = 2, group = G_LINE)
+float touchTolAtr = input.float(0.25, "Допуск касания, ATR", minval = 0.01, step = 0.05, group = G_LINE)
+float mergeAtr    = input.float(0.5, "Объединение уровней в зону, ATR", minval = 0.05, step = 0.05, group = G_LINE)
+int   minGap      = input.int(10, "Мин. баров между опорами линии", minval = 2, group = G_LINE)
+int   maxSpan     = input.int(300, "Макс. баров между опорами линии", minval = 20, maxval = 500, group = G_LINE)
+int   maxAge      = input.int(150, "Линия устаревает: баров без касания", minval = 10, group = G_LINE)
+float maxSlopeAtr = input.float(0.5, "Макс. наклон, ATR на бар", minval = 0.01, step = 0.05, group = G_LINE)
+bool  useTrend    = input.bool(true, "Трендовые линии", group = G_LINE)
+bool  useHoriz    = input.bool(true, "Горизонтальные уровни", group = G_LINE)
+
+const string G_SCORE = "3. Оценка силы линии (0–100)"
+float minScore = input.float(40, "Мин. оценка для сделки", minval = 0, maxval = 100, step = 5, group = G_SCORE,
+     tooltip = "Равные веса — осознанный выбор: нет доказательств, что один компонент важнее другого. Влияние проверено в README.")
+float wTouch = input.float(1, "Вес: число касаний", minval = 0, step = 0.5, group = G_SCORE)
+float wReact = input.float(1, "Вес: сила реакции", minval = 0, step = 0.5, group = G_SCORE)
+float wFresh = input.float(1, "Вес: свежесть", minval = 0, step = 0.5, group = G_SCORE)
+float wSpan  = input.float(1, "Вес: длительность", minval = 0, step = 0.5, group = G_SCORE)
+
+const string G_SIG = "4. Сигналы"
+bool   enableBounce = input.bool(true, "Торговать отскок", group = G_SIG)
+bool   enableBreak  = input.bool(true, "Торговать пробой", group = G_SIG)
+string breakMode    = input.string(M_BOTH, "Вход при пробое", options = [M_CONFIRM, M_RETEST, M_BOTH], group = G_SIG)
+float  breakDistAtr = input.float(0.25, "Мин. дистанция пробоя, ATR", minval = 0, step = 0.05, group = G_SIG)
+float  minBodyFrac  = input.float(0.5, "Мин. доля тела пробойной свечи", minval = 0, maxval = 1, step = 0.05, group = G_SIG)
+float  maxPierceAtr = input.float(0.5, "Макс. прокол линии при отскоке, ATR", minval = 0, step = 0.05, group = G_SIG)
+float  rejectFrac   = input.float(0.6, "Закрытие в доле свечи (реакция)", minval = 0.5, maxval = 1, step = 0.05, group = G_SIG)
+int    retestBars   = input.int(12, "Окно ожидания ретеста, баров", minval = 2, group = G_SIG)
+bool   useVolume    = input.bool(false, "Требовать объём на пробое", group = G_SIG)
+float  volMult      = input.float(1.2, "Объём > SMA(20) ×", minval = 0.5, step = 0.1, group = G_SIG)
+int    cooldownBars = input.int(10, "Пауза между сделками, баров", minval = 0, group = G_SIG)
+bool   useAdxGate   = input.bool(false, "ADX-режимы для пробоя и ретеста", group = G_SIG,
+     tooltip = "Экспериментальная гипотеза V2. На OOS 2023–2026 не подтвердилась (см. README), поэтому по умолчанию выключена.")
+float  breakAdxMax  = input.float(20, "Пробой только при ADX ниже", minval = 1, step = 1, group = G_SIG)
+float  retestAdxMin = input.float(25, "Ретест только при ADX не ниже", minval = 1, step = 1, group = G_SIG)
+
+const string G_FILT = "5. Фильтры"
+string trendMode = input.string(T_EMA, "Фильтр тренда", options = [T_OFF, T_EMA, T_HTF], group = G_FILT)
+int    emaLen    = input.int(200, "Длина EMA", minval = 2, group = G_FILT)
+string htfTf     = input.timeframe("1D", "Старший ТФ", group = G_FILT)
+bool   useVolFlt = input.bool(true, "ATR-фильтр режима волатильности", group = G_FILT)
+float  atrMinK   = input.float(0.6, "ATR / SMA(ATR,100) не ниже", minval = 0, step = 0.1, group = G_FILT)
+float  atrMaxK   = input.float(2.5, "ATR / SMA(ATR,100) не выше", minval = 0.5, step = 0.1, group = G_FILT)
+
+const string G_RISK = "6. Риск и управление сделкой"
+float  riskPct      = input.float(1.0, "Риск на сделку, % капитала", minval = 0.01, maxval = 5, step = 0.25, group = G_RISK)
+float  maxExposure  = input.float(100, "Макс. экспозиция, % капитала", minval = 1, step = 10, group = G_RISK)
+int    maxTradesDay = input.int(3, "Макс. входов в сутки", minval = 1, group = G_RISK)
+bool   allowReverse = input.bool(false, "Разрешить переворот позиции", group = G_RISK)
+string slMode       = input.string(SL_SWING, "Stop Loss", options = [SL_SWING, SL_ATR], group = G_RISK)
+int    slLookback   = input.int(5, "Экстремум: баров назад", minval = 1, group = G_RISK)
+float  slBufAtr     = input.float(0.25, "Буфер за экстремумом, ATR", minval = 0, step = 0.05, group = G_RISK)
+float  slAtr        = input.float(1.5, "Стоп ATR ×", minval = 0.1, step = 0.1, group = G_RISK)
+float  minStopAtr   = input.float(0.5, "Мин. стоп, ATR (уже — расширяется)", minval = 0, step = 0.1, group = G_RISK)
+float  maxStopAtr   = input.float(3.0, "Макс. стоп, ATR (шире — сделка пропускается)", minval = 0.5, step = 0.1, group = G_RISK)
+string tpMode       = input.string(TP_RR, "Take Profit", options = [TP_RR, TP_LEVEL, TP_TRAIL], group = G_RISK)
+float  rrTarget     = input.float(2.0, "Risk/Reward цели", minval = 0.5, step = 0.25, group = G_RISK)
+float  minRR        = input.float(1.5, "Мин. R/R для цели по уровню", minval = 0.5, step = 0.25, group = G_RISK)
+float  beR          = input.float(0, "Безубыток после, R (0 = выкл)", minval = 0, step = 0.25, group = G_RISK)
+float  trailR       = input.float(0, "Trailing после, R (0 = выкл)", minval = 0, step = 0.25, group = G_RISK)
+float  trailAtr     = input.float(2.0, "Trailing, ATR", minval = 0.1, step = 0.25, group = G_RISK)
+
+const string G_VIS = "7. Отображение"
+bool showTrend = input.bool(true, "Трендовые линии", group = G_VIS)
+bool showZones = input.bool(true, "Зоны поддержки/сопротивления", group = G_VIS)
+bool showSig   = input.bool(true, "Метки сигналов", group = G_VIS)
+bool showTrace = input.bool(true, "След линии, давшей сигнал", group = G_VIS)
+bool showSLTP  = input.bool(true, "Вход, Stop Loss, Take Profit", group = G_VIS)
+bool showPanel = input.bool(true, "Панель состояния", group = G_VIS)
+int  maxDraw   = input.int(6, "Сколько сильнейших линий показывать", minval = 1, maxval = 15, group = G_VIS)
+
+color C_SUP  = #26a69a
+color C_RES  = #ef5350
+color C_NEUT = #787b86
+
+// ─── ТИПЫ ───────────────────────────────────────────────────────────────────
+type Pivot
+    int   b                               // бар экстремума
+    float p                               // цена экстремума
+    float react                           // реакция в ATR за pivotRight баров
+
+type KeyLine
+    int   kind                            // K_TREND | K_HORIZ
+    int   side                            // +1 поддержка, -1 сопротивление
+    int   x1
+    float y1
+    float slope = 0.0                     // цена за бар; 0 у горизонтальных
+    int   touches = 1
+    int   firstTouch
+    int   lastTouch
+    float reactSum = 0.0
+    int   state = 0
+    int   breakBar = 0
+    int   falseBreaks = 0
+    int   flips = 0
+    int   lastSig = -1000000
+
+method valueAt(KeyLine this, int x) =>
+    this.y1 + this.slope * (x - this.x1)
+
+// Оценка 0–100: каждый компонент приведён к 0..1, затем взвешенное среднее.
+//  касания  : 2 касания → 0.25, 5 и более → 1
+//  реакция  : средний откат после касания; 3 ATR и более → 1
+//  свежесть : линейно падает до 0 за maxAge баров без касания
+//  длительн.: расстояние между первым и последним касанием; maxSpan/2 и более → 1
+method lineScore(KeyLine this, int nowBar) =>
+    float t = math.min(float(this.touches - 1) / 4.0, 1.0)
+    float r = math.min(this.reactSum / math.max(this.touches, 1) / 3.0, 1.0)
+    float f = math.max(1.0 - float(nowBar - this.lastTouch) / maxAge, 0.0)
+    float d = math.min(float(this.lastTouch - this.firstTouch) / (maxSpan * 0.5), 1.0)
+    100.0 * (wTouch * t + wReact * r + wFresh * f + wSpan * d) / math.max(wTouch + wReact + wFresh + wSpan, 0.0001)
+
+// ─── РЯДЫ ───────────────────────────────────────────────────────────────────
+float atr    = ta.atr(atrLen)
+float atrSma = ta.sma(atr, 100)
+[diPlus, diMinus, adxV] = ta.dmi(14, 14)
+float emaV   = ta.ema(close, emaLen)
+// [1] + lookahead_on — стандартная неперерисовывающаяся форма: берётся значение
+// последнего ЗАКРЫТОГО бара старшего ТФ, и на истории, и в реальном времени.
+float htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaLen)[1], lookahead = barmerge.lookahead_on)
+
+// Pivot по явному правилу: центральный бар — единственный максимум (минимум) окна
+// из pivotLeft + pivotRight + 1 баров. Равные соседние экстремумы pivot не образуют.
+// Правило совпадает с Python-портом; встроенные ta.pivothigh/low не используем,
+// потому что их поведение при равных значениях в документации не описано.
+int   pvWin  = pivotLeft + pivotRight + 1
+float pvHi   = ta.highest(high, pvWin)
+float pvLo   = ta.lowest(low, pvWin)
+int   hiTies = 0
+int   loTies = 0
+for k = 0 to pvWin - 1
+    if high[k] == high[pivotRight]
+        hiTies += 1
+    if low[k] == low[pivotRight]
+        loTies += 1
+float ph = bar_index >= pvWin - 1 and high[pivotRight] == pvHi and hiTies == 1 ? high[pivotRight] : na
+float pl = bar_index >= pvWin - 1 and low[pivotRight] == pvLo and loTies == 1 ? low[pivotRight] : na
+float rightHi = ta.highest(high, pivotRight)
+float rightLo = ta.lowest(low, pivotRight)
+float swingHi = ta.highest(high, slLookback)
+float swingLo = ta.lowest(low, slLookback)
+float volSma  = ta.sma(volume, 20)
+float minQty  = math.max(nz(syminfo.mincontract), 1e-8)
+bool  hasVol  = ta.cum(nz(volume)) > 0
+
+float rng     = math.max(high - low, syminfo.mintick)
+float bodyPct = math.abs(close - open) / rng
+
+bool inWindow = time >= startTime and time < endTime
+bool volOk    = not useVolFlt or (atr / atrSma >= atrMinK and atr / atrSma <= atrMaxK)
+bool volBreak = not useVolume or not hasVol or volume > volSma * volMult
+
+float trendRef = trendMode == T_EMA ? emaV : trendMode == T_HTF ? htfEma : na
+bool  trendUp  = trendMode == T_OFF or close > trendRef
+bool  trendDn  = trendMode == T_OFF or close < trendRef
+
+// ─── СОСТОЯНИЕ ──────────────────────────────────────────────────────────────
+var array<Pivot>   pivHighs = array.new<Pivot>()
+var array<Pivot>   pivLows  = array.new<Pivot>()
+var array<KeyLine> pool     = array.new<KeyLine>()
+const int PIVOT_KEEP = 24
+const int POOL_MAX   = 40
+
+var int   tDir       = 0                  // направление сделки: +1, -1, 0
+var int   tSigBar    = 0
+var float tEntry     = na
+var float tStop      = na
+var float tTP        = na
+var float tRisk      = na
+var float tExt       = na
+var bool  tFilled    = false
+var string tId       = ""
+var string tSetup    = ""
+var int   lastExitBar = -1000000
+var int   dayCount   = 0
+var string lastSigText = "—"
+
+// ─── ФУНКЦИИ ЛИНИЙ ──────────────────────────────────────────────────────────
+// Линия отработала: трендовая удаляется, горизонтальная меняет роль
+// (поддержка ↔ сопротивление), а после второй смены роли теряет актуальность.
+finishLine(KeyLine l, int idx) =>
+    if l.kind == K_TREND
+        pool.remove(idx)
+    else
+        l.side := -l.side
+        l.state := ST_ACTIVE
+        l.flips += 1
+        if l.flips >= 2
+            pool.remove(idx)
+    true
+
+// Обрезка пула по оценке, чтобы цена расчёта на бар была ограничена.
+trimPool() =>
+    if pool.size() > POOL_MAX
+        int   worst = 0
+        float low_  = 1e9
+        for [i, l] in pool
+            float sc = l.lineScore(bar_index) + (l.touches >= minTouches ? 100.0 : 0.0)
+            if sc < low_
+                low_ := sc
+                worst := i
+        pool.remove(worst)
+    true
+
+// Обработка pivot в момент его подтверждения. side: +1 pivot low, -1 pivot high.
+// Строго последовательность: касания существующих линий → горизонтальный уровень
+// → новая трендовая линия. На один pivot рождается не более одной трендовой линии.
+registerPivot(Pivot p, array<Pivot> store, int side) =>
+    float tol = touchTolAtr * atr
+    bool  touchedTrend = false
+    for l in pool
+        if l.kind == K_TREND and l.state == ST_ACTIVE and l.side == side and math.abs(p.p - l.valueAt(p.b)) <= tol
+            l.touches += 1
+            l.lastTouch := p.b
+            l.reactSum += p.react
+            touchedTrend := true
+
+    if useHoriz
+        KeyLine best = na
+        float bestDist = mergeAtr * atr
+        for l in pool
+            if l.kind == K_HORIZ
+                float dist = math.abs(p.p - l.y1)
+                if dist <= bestDist
+                    bestDist := dist
+                    best := l
+        if na(best)
+            pool.push(KeyLine.new(kind = K_HORIZ, side = close >= p.p ? 1 : -1, x1 = p.b, y1 = p.p, touches = 1, firstTouch = p.b, lastTouch = p.b, reactSum = p.react))
+        else
+            best.y1 := (best.y1 * best.touches + p.p) / (best.touches + 1)
+            best.touches += 1
+            best.lastTouch := math.max(best.lastTouch, p.b)
+            best.reactSum += p.react
+
+    if useTrend and not touchedTrend and store.size() > 0
+        int   bestT = 0
+        int   bestS = 0
+        Pivot bestQ = na
+        float bestSlope = 0.0
+        float bestReact = 0.0
+        for i = store.size() - 1 to 0
+            Pivot q = store.get(i)
+            int span = p.b - q.b
+            if span > maxSpan
+                break
+            // Поддержка — растущие минимумы, сопротивление — снижающиеся максимумы.
+            if span >= minGap and side * (p.p - q.p) > 0
+                float slope = (p.p - q.p) / span
+                if math.abs(slope) <= maxSlopeAtr * atr
+                    // Ни одного закрытия за линией от первой опоры до текущего бара.
+                    bool valid = true
+                    int  back  = bar_index - q.b
+                    for k = 0 to back
+                        float lv = q.p + slope * (back - k)
+                        if side * (close[k] - lv) < -tol
+                            valid := false
+                            break
+                    if valid
+                        int   t = 2
+                        float rs = p.react + q.react
+                        for r in store
+                            if r.b > q.b and r.b < p.b and math.abs(r.p - (q.p + slope * (r.b - q.b))) <= tol
+                                t += 1
+                                rs += r.react
+                        if t > bestT or (t == bestT and span > bestS)
+                            bestT := t
+                            bestS := span
+                            bestQ := q
+                            bestSlope := slope
+                            bestReact := rs
+        if not na(bestQ)
+            pool.push(KeyLine.new(kind = K_TREND, side = side, x1 = bestQ.b, y1 = bestQ.p, slope = bestSlope, touches = bestT, firstTouch = bestQ.b, lastTouch = p.b, reactSum = bestReact))
+
+    store.push(p)
+    if store.size() > PIVOT_KEEP
+        store.shift()
+    trimPool()
+
+// ─── АЛЕРТЫ (JSON для strategy order fill alerts) ───────────────────────────
+fPrice(float x) =>
+    na(x) ? "null" : str.tostring(x, format.mintick)
+
+entryJson(string id, int dir, string setup, float entry, float sl, float tp, float qty) =>
+    '{"v":1,"event":"entry","id":"' + id + '","symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period +
+     '","side":"' + (dir > 0 ? "long" : "short") + '","setup":"' + setup + '","price":' + fPrice(entry) +
+     ',"sl":' + fPrice(sl) + ',"tp":' + fPrice(tp) + ',"qty":' + str.tostring(qty) + '}'
+
+stopJson(string id, float sl) =>
+    '{"v":1,"event":"stop_update","id":"' + id + '","symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","sl":' + fPrice(sl) + '}'
+
+exitJson(string id, string reason) =>
+    '{"v":1,"event":"exit","id":"' + id + '","symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","reason":"' + reason + '"}'
+
+// ─── ЗАЩИТА ОТ НЕКОРРЕКТНОГО ЗАПУСКА ────────────────────────────────────────
+if barstate.isfirst
+    if not chart.is_standard
+        runtime.error("Запускайте стратегию на стандартных свечах: Heikin Ashi, Renko и т.п. искажают исполнение.")
+    if trendMode == T_HTF and timeframe.in_seconds(htfTf) <= timeframe.in_seconds()
+        runtime.error("Старший ТФ фильтра должен быть больше ТФ графика.")
+
+// ─── СЧЁТЧИКИ И УЧЁТ ПОЗИЦИИ ────────────────────────────────────────────────
+if timeframe.change("D")
+    dayCount := 0
+
+// Сделка завершилась на этом баре (стоп, тейк или закрытие периода).
+if tDir != 0 and strategy.position_size == 0 and bar_index > tSigBar
+    tDir := 0
+    tFilled := false
+    lastExitBar := bar_index
+
+// Сопровождение: используем только максимум/минимум уже ЗАКРЫТОГО бара,
+// новый стоп начинает действовать со следующего бара.
+float prevStop = tStop
+if tDir != 0 and strategy.position_size * tDir > 0
+    if not tFilled
+        tFilled := true
+        tEntry := strategy.position_avg_price
+        tRisk := math.abs(tEntry - tStop)
+    tExt := tDir > 0 ? math.max(tExt, high) : math.min(tExt, low)
+    float gain = tDir * (tExt - tEntry)
+    if beR > 0 and gain >= beR * tRisk
+        tStop := tDir > 0 ? math.max(tStop, tEntry) : math.min(tStop, tEntry)
+    if trailR > 0 and gain >= trailR * tRisk
+        float tr = tExt - tDir * trailAtr * atr
+        tStop := tDir > 0 ? math.max(tStop, tr) : math.min(tStop, tr)
+    // Сдвиг стопа не является исполнением ордера, поэтому о нём нужен отдельный алерт.
+    if tStop != prevStop
+        alert(stopJson(tId, tStop), alert.freq_once_per_bar_close)
+
+// ─── ОСНОВНОЙ ЦИКЛ НА ЗАКРЫТОЙ СВЕЧЕ ────────────────────────────────────────
+int     longType   = 0
+int     shortType  = 0
+float   longScore  = -1.0
+float   shortScore = -1.0
+KeyLine longLine   = na
+KeyLine shortLine  = na
+bool    signalNow  = false
+
+if barstate.isconfirmed and not na(atr) and not na(atrSma)
+    float tol    = touchTolAtr * atr
+    float breakD = breakDistAtr * atr
+    float pierce = maxPierceAtr * atr
+
+    if pool.size() > 0
+        for i = pool.size() - 1 to 0
+            KeyLine l = pool.get(i)
+            if bar_index - l.lastTouch > maxAge
+                pool.remove(i)
+                continue
+
+            int   s    = l.side
+            float v    = l.valueAt(bar_index)
+            float vp   = l.valueAt(bar_index - 1)
+            float near = s == 1 ? low : high      // экстремум бара со стороны линии
+            float far_ = s == 1 ? high : low      // экстремум бара с дальней стороны
+            float cPos = s == 1 ? (close - low) / rng : (high - close) / rng
+            float sc   = l.lineScore(bar_index)
+            bool  ok   = l.touches >= minTouches and sc >= minScore and bar_index - l.lastSig >= cooldownBars
+            int   sigType = 0
+            int   sigDir  = 0
+
+            if l.state == ST_ACTIVE
+                if s * (close - v) < -breakD
+                    // Первое закрытие за линией с минимальной дистанцией.
+                    bool firstClose = s * (close[1] - vp) >= -breakD
+                    bool strong     = s * (close - open) < 0 and bodyPct >= minBodyFrac and volBreak
+                    if l.touches >= minTouches and strong and firstClose
+                        l.state := ST_BROKEN
+                        l.breakBar := bar_index
+                    else
+                        finishLine(l, i)
+                else if enableBounce
+                    // Отскок: дотянулись до линии, не провалились глубоко, закрылись
+                    // по рабочую сторону в дальней части свечи и в сторону отскока.
+                    bool touched  = s * (near - v) <= tol and s * (near - v) >= -pierce
+                    bool fromSide = s * (close[1] - vp) > 0
+                    bool reaction = s * (close - v) > 0 and s * (close - open) > 0 and cPos >= rejectFrac
+                    if touched and fromSide and reaction
+                        sigType := SIG_BOUNCE
+                        sigDir  := s
+            else
+                int age = bar_index - l.breakBar
+                if s * (close - v) > 0
+                    // Вернулись за линию до входа — ложный пробой, линия живёт дальше.
+                    l.state := ST_ACTIVE
+                    l.falseBreaks += 1
+                    if l.falseBreaks >= 2
+                        finishLine(l, i)
+                else
+                    bool done = false
+                    if age == 1 and breakMode != M_RETEST
+                        if enableBreak and s * (close - v) < -breakD and s * (close - open) < 0
+                            sigType := SIG_BREAK
+                            sigDir  := -s
+                        if breakMode == M_CONFIRM
+                            done := true
+                    if sigType == 0 and breakMode != M_CONFIRM
+                        // Ретест: вернулись к линии с другой стороны и получили реакцию.
+                        bool back = s * (far_ - v) >= -tol
+                        if enableBreak and back and s * (close - open) < 0 and 1.0 - cPos >= rejectFrac
+                            sigType := SIG_RETEST
+                            sigDir  := -s
+                            done := true
+                        else if age >= retestBars
+                            done := true
+                    if done
+                        finishLine(l, i)
+
+            if useAdxGate and ((sigType == SIG_BREAK and not (adxV < breakAdxMax)) or (sigType == SIG_RETEST and not (adxV >= retestAdxMin)))
+                sigType := 0
+
+            if sigType > 0 and ok
+                if sigDir > 0 and sc > longScore
+                    longType  := sigType
+                    longScore := sc
+                    longLine  := l
+                if sigDir < 0 and sc > shortScore
+                    shortType  := sigType
+                    shortScore := sc
+                    shortLine  := l
+
+    // Новые pivot обрабатываем ПОСЛЕ сигналов: линия, родившаяся на этом баре,
+    // не может дать сигнал на этом же баре.
+    if not na(pl)
+        registerPivot(Pivot.new(bar_index - pivotRight, pl, (rightHi - pl) / atr[pivotRight]), pivLows, 1)
+    if not na(ph)
+        registerPivot(Pivot.new(bar_index - pivotRight, ph, (ph - rightLo) / atr[pivotRight]), pivHighs, -1)
+
+    // Решение. Встречные сигналы на одном баре взаимно отменяются.
+    int dirSig = longType > 0 and shortType > 0 ? 0 : longType > 0 ? 1 : shortType > 0 ? -1 : 0
+    bool canEnter = dirSig != 0 and inWindow and volOk and dayCount < maxTradesDay
+         and (dirSig > 0 ? allowLong and trendUp : allowShort and trendDn)
+         and bar_index - lastExitBar >= cooldownBars
+         and (strategy.position_size == 0 or (allowReverse and strategy.position_size * dirSig < 0))
+
+    if canEnter
+        KeyLine src  = dirSig > 0 ? longLine : shortLine
+        int     type_ = dirSig > 0 ? longType : shortType
+        float   stop = slMode == SL_SWING ? (dirSig > 0 ? swingLo : swingHi) - dirSig * slBufAtr * atr : close - dirSig * slAtr * atr
+        // Стоп уже минимального расширяем, а слишком широкий стоп отменяет сделку.
+        if dirSig * (close - stop) < minStopAtr * atr
+            stop := close - dirSig * minStopAtr * atr
+        float risk = math.abs(close - stop)
+
+        float tp     = tpMode == TP_TRAIL ? na : close + dirSig * rrTarget * risk
+        bool  tpOk   = true
+        if tpMode == TP_LEVEL
+            float nearest = na
+            for l in pool
+                if l.side == -dirSig and l.state == ST_ACTIVE and l.touches >= minTouches
+                    float lv = l.valueAt(bar_index) - dirSig * tol
+                    if dirSig * (lv - close) > 0 and (na(nearest) or dirSig * (nearest - lv) > 0)
+                        nearest := lv
+            if not na(nearest)
+                tp := nearest
+                tpOk := dirSig * (tp - close) >= minRR * risk
+
+        float qty = strategy.equity * riskPct / 100.0 / (risk * syminfo.pointvalue)
+        qty := math.min(qty, strategy.equity * maxExposure / 100.0 / (close * syminfo.pointvalue))
+        qty := math.floor(qty / minQty) * minQty
+
+        if risk <= maxStopAtr * atr and tpOk and qty >= minQty
+            string setup = type_ == SIG_BOUNCE ? "bounce" : type_ == SIG_BREAK ? "breakout" : "retest"
+            string id    = syminfo.ticker + "-" + timeframe.period + "-" + str.tostring(time) + "-" + (dirSig > 0 ? "L" : "S")
+            strategy.entry(dirSig > 0 ? "L" : "S", dirSig > 0 ? strategy.long : strategy.short, qty = qty,
+                 comment = setup, alert_message = entryJson(id, dirSig, setup, close, stop, tp, qty))
+
+            tDir    := dirSig
+            tSigBar := bar_index
+            tEntry  := close
+            tStop   := stop
+            tRisk   := risk
+            tTP     := tp
+            tExt    := close
+            tFilled := false
+            tId     := id
+            tSetup  := setup
+            dayCount += 1
+            src.lastSig := bar_index
+            signalNow := true
+            lastSigText := (dirSig > 0 ? "LONG " : "SHORT ") + setup + " · " + str.tostring(dirSig > 0 ? longScore : shortScore, "#")
+
+            if showSig
+                label.new(bar_index, dirSig > 0 ? low : high, (type_ == SIG_BOUNCE ? "B" : type_ == SIG_BREAK ? "BO" : "RT"),
+                     style = dirSig > 0 ? label.style_label_up : label.style_label_down,
+                     color = color.new(dirSig > 0 ? C_SUP : C_RES, 15), textcolor = color.white, size = size.tiny,
+                     tooltip = setup + " | линия: " + (src.kind == K_TREND ? "трендовая" : "уровень") + " | касаний: " + str.tostring(src.touches) + " | оценка: " + str.tostring(dirSig > 0 ? longScore : shortScore, "#.0"))
+            if showTrace
+                line.new(math.max(src.firstTouch, bar_index - DRAW_BACK), src.valueAt(math.max(src.firstTouch, bar_index - DRAW_BACK)), bar_index, src.valueAt(bar_index),
+                     color = color.new(C_NEUT, 35), style = line.style_dotted, width = 1)
+
+// Окончание периода теста: позиция не должна переживать окно.
+if time >= endTime and strategy.position_size != 0
+    strategy.close_all(comment = "end", alert_message = exitJson(tId, "period_end"))
+
+// Выходы переустанавливаем каждый бар: стоп мог сдвинуться по правилам сопровождения.
+if tDir != 0
+    string eid = tDir > 0 ? "L" : "S"
+    string xid = tDir > 0 ? "XL" : "XS"
+    strategy.exit(xid, eid, limit = tTP, stop = tStop,
+         comment_profit = "TP", comment_loss = "SL",
+         alert_message = exitJson(tId, "exit"), alert_profit = exitJson(tId, "tp"), alert_loss = exitJson(tId, "stop"))
+
+// ─── ОТОБРАЖЕНИЕ ────────────────────────────────────────────────────────────
+
+var array<line> drawnLines = array.new<line>()
+var array<box>  drawnBoxes = array.new<box>()
+
+// Рисуем только на последнем баре: только актуальные и подтверждённые линии.
+if barstate.islast
+    for ln in drawnLines
+        ln.delete()
+    drawnLines.clear()
+    for bx in drawnBoxes
+        bx.delete()
+    drawnBoxes.clear()
+
+    array<KeyLine> shown = array.new<KeyLine>()
+    array<bool>    used  = array.new<bool>(pool.size(), false)
+    for n = 1 to maxDraw
+        int   pick = -1
+        float bestS = -1.0
+        for [i, l] in pool
+            if not used.get(i) and l.touches >= minTouches
+                float sc = l.lineScore(bar_index)
+                if sc > bestS
+                    bestS := sc
+                    pick := i
+        if pick < 0
+            break
+        used.set(pick, true)
+        KeyLine l = pool.get(pick)
+        bool dup = false
+        for o in shown
+            if math.abs(o.valueAt(bar_index) - l.valueAt(bar_index)) <= touchTolAtr * atr
+                dup := true
+        if not dup
+            shown.push(l)
+            color c = l.side > 0 ? C_SUP : C_RES
+            if l.kind == K_TREND and showTrend
+                drawnLines.push(line.new(math.max(l.x1, bar_index - DRAW_BACK), l.valueAt(math.max(l.x1, bar_index - DRAW_BACK)), bar_index + 15, l.valueAt(bar_index + 15), color = c, width = 2,
+                     style = l.state == ST_ACTIVE ? line.style_solid : line.style_dashed))
+            if l.kind == K_HORIZ and showZones
+                float tolV = touchTolAtr * atr
+                drawnBoxes.push(box.new(math.max(l.firstTouch, bar_index - DRAW_BACK), l.y1 + tolV, bar_index + 15, l.y1 - tolV, border_color = color.new(c, 60),
+                     bgcolor = color.new(c, 85)))
+
+plot(showSLTP and tDir != 0 ? tEntry : na, "Вход", color = C_NEUT, style = plot.style_linebr)
+plot(showSLTP and tDir != 0 ? tStop : na, "Stop Loss", color = C_RES, style = plot.style_linebr, linewidth = 2)
+plot(showSLTP and tDir != 0 ? tTP : na, "Take Profit", color = C_SUP, style = plot.style_linebr, linewidth = 2)
+plot(trendRef, "EMA-фильтр", color = color.new(C_NEUT, 50))
+
+var table panel = table.new(position.top_right, 2, 6, bgcolor = color.new(#131722, 15), border_width = 1)
+fRow(int r, string k, string v, color c) =>
+    panel.cell(0, r, k, text_color = C_NEUT, text_size = size.small, text_halign = text.align_left)
+    panel.cell(1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+if barstate.islast and showPanel
+    float rNow = tDir != 0 and tFilled ? tDir * (close - tEntry) / tRisk : na
+    int   nLines = 0
+    for l in pool
+        if l.touches >= minTouches
+            nLines += 1
+    fRow(0, "Позиция", tDir > 0 ? "LONG" : tDir < 0 ? "SHORT" : "нет", tDir > 0 ? C_SUP : tDir < 0 ? C_RES : color.white)
+    fRow(1, "Вход", tDir != 0 ? str.tostring(tEntry, format.mintick) + " · " + tSetup : "—", color.white)
+    fRow(2, "SL / TP", tDir != 0 ? str.tostring(tStop, format.mintick) + " / " + fPrice(tTP) : "—", color.white)
+    fRow(3, "Текущий R", na(rNow) ? "—" : str.tostring(rNow, "#.00"), na(rNow) ? color.white : rNow >= 0 ? C_SUP : C_RES)
+    fRow(4, "Активных линий", str.tostring(nLines), color.white)
+    fRow(5, "Последний сигнал", lastSigText, color.white)
